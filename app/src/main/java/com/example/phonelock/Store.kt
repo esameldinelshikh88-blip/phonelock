@@ -6,10 +6,17 @@ import android.os.SystemClock
 import android.provider.Settings
 import java.util.Calendar
 
-const val LOCK_MS = 24L * 60 * 60 * 1000
+// مدة القفل عند تجاوز الحد اليومي (3 ساعات)
+const val LOCK_MS = 3L * 60 * 60 * 1000
 
 class Store(private val c: Context) {
     private val p = c.getSharedPreferences("s", Context.MODE_PRIVATE)
+
+    // فترات القفل المجدولة: (بداية، نهاية) بالدقائق من منتصف الليل
+    private val windows = listOf(
+        (15 * 60) to (22 * 60),      // 3:00 م إلى 10:00 م
+        (1 * 60) to (7 * 60 + 30)    // 1:00 ص إلى 7:30 ص
+    )
 
     var limitMin: Int
         get() = p.getInt("limit", 180)
@@ -23,10 +30,20 @@ class Store(private val c: Context) {
         .putInt("boot", bootCount())
         .putBoolean("locked", true).apply()
 
-    /** milliseconds left in the lock; 0 = not locked */
-    fun remainingMs(): Long {
+    /** المتبقي من فترة القفل المجدولة، أو 0 إن لم نكن داخل فترة */
+    private fun scheduleRemainingMs(): Long {
+        val cal = Calendar.getInstance()
+        val nowMin = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+        val sec = cal.get(Calendar.SECOND)
+        for ((s, e) in windows) {
+            if (nowMin >= s && nowMin < e) return ((e - nowMin) * 60L - sec) * 1000
+        }
+        return 0
+    }
+
+    /** المتبقي من قفل تجاوز الحد اليومي */
+    private fun limitRemainingMs(): Long {
         if (!p.getBoolean("locked", false)) return 0
-        // Same boot: trust elapsedRealtime (immune to clock changes). After reboot: wall clock.
         val passed = if (p.getInt("boot", -1) == bootCount())
             SystemClock.elapsedRealtime() - p.getLong("elapsed", 0)
         else System.currentTimeMillis() - p.getLong("wall", 0)
@@ -35,8 +52,10 @@ class Store(private val c: Context) {
         return left
     }
 
+    /** أكبر المدتين: الجدول أو الحد اليومي. 0 = غير مقفل */
+    fun remainingMs(): Long = maxOf(scheduleRemainingMs(), limitRemainingMs())
+
     private fun unlock() {
-        // new baseline so usage already counted today doesn't re-lock immediately
         p.edit().putBoolean("locked", false)
             .putLong("base", todayUsageRaw()).putLong("baseDay", dayStart()).apply()
     }
